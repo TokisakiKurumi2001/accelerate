@@ -22,7 +22,6 @@ import evaluate
 from accelerate import Accelerator, DistributedType
 from accelerate.utils import set_seed
 from datasets import load_dataset
-from tqdm.auto import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
 
 
@@ -104,12 +103,6 @@ def training_function(config, args):
     seed = int(config["seed"])
     batch_size = int(config["batch_size"])
 
-    # If the batch size is too big we use gradient accumulation
-    gradient_accumulation_steps = 1
-    if batch_size > MAX_GPU_BATCH_SIZE:
-        gradient_accumulation_steps = batch_size // MAX_GPU_BATCH_SIZE
-        batch_size = MAX_GPU_BATCH_SIZE
-
     # We start on the main process first so one download completes and gets loaded in
     with accelerator.main_process_first():
         set_seed(seed)
@@ -130,7 +123,7 @@ def training_function(config, args):
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,
-        num_training_steps=(len(train_dataloader) * num_epochs) // gradient_accumulation_steps,
+        num_training_steps=(len(train_dataloader) * num_epochs),
     )
 
     # Prepare everything
@@ -140,9 +133,6 @@ def training_function(config, args):
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
 
-    # Finally make a progress bar, disabiling it on all but the main process
-    progress_bar = tqdm(range(num_epochs * len(train_dataloader)), disable=not accelerator.is_main_process)
-
     # Now we train the model
     for epoch in range(num_epochs):
         model.train()
@@ -151,13 +141,10 @@ def training_function(config, args):
             batch.to(accelerator.device)
             outputs = model(**batch)
             loss = outputs.loss
-            loss = loss / gradient_accumulation_steps
             accelerator.backward(loss)
-            if step % gradient_accumulation_steps == 0:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
 
         model.eval()
         for step, batch in enumerate(eval_dataloader):
