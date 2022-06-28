@@ -102,12 +102,6 @@ def training_function(config, args):
     # transformers library
     tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
 
-    # If the batch size is too big we use gradient accumulation
-    gradient_accumulation_steps = 1
-    if batch_size > MAX_GPU_BATCH_SIZE:
-        gradient_accumulation_steps = batch_size // MAX_GPU_BATCH_SIZE
-        batch_size = MAX_GPU_BATCH_SIZE
-
     def collate_fn(examples):
         # On TPU it's best to pad everything to the same length or training will be very slow.
         if accelerator.distributed_type == DistributedType.TPU:
@@ -139,7 +133,7 @@ def training_function(config, args):
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=100,
-        num_training_steps=(len(train_dataloader) * num_epochs) // gradient_accumulation_steps,
+        num_training_steps=(len(train_dataloader) * num_epochs),
     )
 
     # Prepare everything
@@ -191,15 +185,13 @@ def training_function(config, args):
             batch.to(accelerator.device)
             outputs = model(**batch)
             loss = outputs.loss
-            loss = loss / gradient_accumulation_steps
             # We keep track of the loss at each epoch
             if args.with_tracking:
                 total_loss += loss.detach().float()
             accelerator.backward(loss)
-            if step % gradient_accumulation_steps == 0:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
 
             overall_step += 1
 
