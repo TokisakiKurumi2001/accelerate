@@ -20,8 +20,10 @@ from torch.utils.data import DataLoader
 
 import evaluate
 from accelerate import Accelerator, DistributedType
+from accelerate.utils import set_seed
 from datasets import load_dataset
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup, set_seed
+from tqdm.auto import tqdm
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
 
 
 ########################################################################
@@ -32,7 +34,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_
 #   - single CPU or single GPU
 #   - multi GPUS (using PyTorch distributed mode)
 #   - (multi) TPUs
-#   - fp16 (mixed-precision) or fp32 (normal precision)
+#   - fp16 (mixed-precision), fp32 (normal precision), bf16 (brain mixed-precision)
 #
 # To run it in each of these various modes, follow the instructions
 # in the readme for examples:
@@ -74,6 +76,7 @@ def get_dataloaders(accelerator: Accelerator, batch_size: int = 16):
     # We also rename the 'label' column to 'labels' which is the expected name for labels by the models of the
     # transformers library
     tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
+    tokenized_datasets.set_format("torch")
 
     def collate_fn(examples):
         # On TPU it's best to pad everything to the same length or training will be very slow.
@@ -101,18 +104,19 @@ def training_function(config, args):
     seed = int(config["seed"])
     batch_size = int(config["batch_size"])
 
-    metric = evaluate.load("glue", "mrpc")
-
     # If the batch size is too big we use gradient accumulation
     gradient_accumulation_steps = 1
     if batch_size > MAX_GPU_BATCH_SIZE:
         gradient_accumulation_steps = batch_size // MAX_GPU_BATCH_SIZE
         batch_size = MAX_GPU_BATCH_SIZE
 
-    set_seed(seed)
-    train_dataloader, eval_dataloader = get_dataloaders(accelerator, batch_size)
-    # Instantiate the model (we build the model here so that the seed also control new weights initialization)
-    model = AutoModelForSequenceClassification.from_pretrained("bert-base-cased", return_dict=True)
+    # We start on the main process first so one download completes and gets loaded in
+    with accelerator.main_process_first():
+        set_seed(seed)
+        train_dataloader, eval_dataloader = get_dataloaders(accelerator, batch_size)
+        # Instantiate the model (we build the model here so that the seed also control new weights initialization)
+        model = AutoModelForSequenceClassification.from_pretrained("bert-base-cased", return_dict=True)
+        metric = evaluate.load("glue", "mrpc")
 
     # We could avoid this line since the accelerator is set with `device_placement=True` (default value).
     # Note that if you are placing tensors on devices manually, this line absolutely needs to be before the optimizer
@@ -136,6 +140,9 @@ def training_function(config, args):
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
 
+    # Finally make a progress bar, disabiling it on all but the main process
+    progress_bar = tqdm(range(num_epochs * len(train_dataloader)), disable=not accelerator.is_main_process)
+
     # Now we train the model
     for epoch in range(num_epochs):
         model.train()
@@ -150,6 +157,7 @@ def training_function(config, args):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                progress_bar.update(1)
 
         model.eval()
         for step, batch in enumerate(eval_dataloader):
@@ -177,8 +185,7 @@ def main():
         default="no",
         choices=["no", "fp16", "bf16"],
         help="Whether to use mixed precision. Choose"
-        "between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >= 1.10."
-        "and an Nvidia Ampere GPU.",
+        "between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >= 1.10.",
     )
     parser.add_argument("--cpu", action="store_true", help="If passed, will train on the CPU.")
     args = parser.parse_args()

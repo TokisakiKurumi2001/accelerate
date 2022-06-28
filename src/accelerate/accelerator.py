@@ -69,6 +69,7 @@ if is_deepspeed_available():
     )
 
 if is_tpu_available(check_device=False):
+    import torch_xla.core.xla_model as xm
     import torch_xla.distributed.xla_multiprocessing as xmp
 
 logger = get_logger(__name__)
@@ -301,7 +302,10 @@ class Accelerator:
     @property
     def is_local_main_process(self):
         """True for one process per server."""
-        return self.local_process_index == 0
+        if is_tpu_available():
+            return xm.is_master_ordinal()
+        else:
+            return self.local_process_index == 0
 
     @property
     def use_fp16(self):
